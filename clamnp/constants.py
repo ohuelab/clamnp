@@ -19,3 +19,7 @@ DEFAULT_HF_REPO = "kohbanye/clamnp"
 #   - ``synthetic_only``: log-likelihood under the synthetic model only
 SCORING_MODES = ("stabilized", "unstabilized", "natural_only", "synthetic_only")
 DEFAULT_SCORING_MODE = "stabilized"
+
+# Default sigmoid steepness (k) for mapping the raw log-likelihood ratio to a
+# [0, 1] score. k=2 matches the calibration used in the paper.
+DEFAULT_SIGMOID_K = 2.0

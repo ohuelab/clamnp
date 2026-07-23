@@ -8,6 +8,7 @@ Hugging Face Hub via :meth:`CLaMNPScorer.from_pretrained`.
 from __future__ import annotations
 
 import math
+from typing import overload
 
 import torch
 from rdkit import Chem
@@ -16,6 +17,7 @@ from rdkit.Chem.Scaffolds import MurckoScaffold
 from .constants import (
     DEFAULT_HF_REPO,
     DEFAULT_SCORING_MODE,
+    DEFAULT_SIGMOID_K,
     SCORING_MODES,
 )
 from .scoring import HFLanguageModel, LogLikelihoodMixin
@@ -29,7 +31,7 @@ class CLaMNPScorer:
         natural_model: LogLikelihoodMixin,
         synthetic_model: LogLikelihoodMixin,
         general_model: LogLikelihoodMixin | None = None,
-        sigmoid_k: float = 1.0,
+        sigmoid_k: float = DEFAULT_SIGMOID_K,
         sigmoid_offset: float = 0.0,
         scaffold_only: bool = False,
         scoring_mode: str = DEFAULT_SCORING_MODE,
@@ -193,8 +195,8 @@ class CLaMNPScorer:
 
         return result
 
-    def score(self, smiles: str) -> float:
-        """Calculate NP-likeness score for a SMILES string.
+    def _score_raw(self, smiles: str) -> float:
+        """Raw NP-likeness score (log-likelihood ratio) for a SMILES string.
 
         Scoring modes:
         - "stabilized": log P(x|natural) - log(a*P(x|synthetic) + (1-a)*P(x|general))
@@ -204,9 +206,8 @@ class CLaMNPScorer:
         - "natural_only": log P(x|natural)
         - "synthetic_only": log P(x|synthetic)
 
-        For "stabilized" and "unstabilized" modes:
-        - Higher scores indicate more natural product-like.
-        - Lower scores indicate more synthetic/general-like.
+        Unbounded; positive = more natural-product-like, negative = more
+        synthetic/general-like.
         """
         smiles = self._process_smiles(smiles)
 
@@ -236,8 +237,31 @@ class CLaMNPScorer:
             # This should never happen due to validation in __init__
             raise ValueError(f"Invalid scoring_mode: {self.scoring_mode}")
 
-    def batch_score(self, smiles_list: list[str]) -> list[float]:
-        """Calculate NP-likeness scores for a batch of SMILES strings."""
+    @overload
+    def score(self, smiles: str, raw: bool = ...) -> float: ...
+
+    @overload
+    def score(self, smiles: list[str], raw: bool = ...) -> list[float]: ...
+
+    def score(self, smiles: str | list[str], raw: bool = False) -> float | list[float]:
+        """Calculate the CLaM-NP Score for one or more SMILES strings.
+
+        Pass a list of SMILES to score them in a single batched forward pass
+        (much faster than scoring one at a time): a list input returns a list of
+        scores, a single string returns a single score.
+
+        Returns the sigmoid-normalized score in [0, 1] (0.5 = neutral, higher =
+        more natural-product-like). Pass ``raw=True`` for the underlying raw
+        log-likelihood ratio instead (unbounded; positive = more natural-like).
+        """
+        if isinstance(smiles, str):
+            raw_score = self._score_raw(smiles)
+            return raw_score if raw else self._sigmoid_normalize(raw_score)
+        raw_scores = self._batch_score_raw(list(smiles))
+        return raw_scores if raw else [self._sigmoid_normalize(s) for s in raw_scores]
+
+    def _batch_score_raw(self, smiles_list: list[str]) -> list[float]:
+        """Raw NP-likeness scores for a batch of SMILES strings."""
         smiles_list = [self._process_smiles(smiles) for smiles in smiles_list]
 
         if self.scoring_mode == "unstabilized":
@@ -297,23 +321,6 @@ class CLaMNPScorer:
         adjusted_llr = llr + self.sigmoid_offset
         return 1.0 / (1.0 + math.exp(-self.sigmoid_k * adjusted_llr))
 
-    def score_normalized(self, smiles: str) -> float:
-        """Calculate normalized NP-likeness score for a SMILES string.
-
-        Returns score in range [0, 1] where:
-        - Values closer to 1 indicate more natural product-like
-        - Values closer to 0 indicate more synthetic-like
-        """
-        smiles = self._process_smiles(smiles)
-
-        raw_score = self.score(smiles)
-        return self._sigmoid_normalize(raw_score)
-
-    def batch_score_normalized(self, smiles_list: list[str]) -> list[float]:
-        """Calculate normalized NP-likeness scores for a batch of SMILES strings."""
-        raw_scores = self.batch_score(smiles_list)
-        return [self._sigmoid_normalize(score) for score in raw_scores]
-
     def score_with_details(self, smiles: str) -> dict[str, float]:
         """Calculate NP-likeness score with a detailed breakdown.
 
@@ -360,7 +367,7 @@ class CLaMNPScorer:
                 result["dynamic_alpha"] = alpha
 
         # Calculate raw score using current scoring mode
-        raw_score = self.score(smiles)
+        raw_score = self._score_raw(smiles)
         normalized_score = self._sigmoid_normalize(raw_score)
 
         result["score"] = raw_score

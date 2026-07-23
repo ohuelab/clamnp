@@ -3,47 +3,25 @@
 **C**hemical **La**nguage **M**odels for **N**atural **P**roduct-Likeness Score.
 
 CLaM-NP scores how "natural-product-like" a molecule is by comparing the
-likelihood of its SMILES string under decoder-only language models trained on
-different chemical spaces. A molecule that a natural-product model finds likely
-but a synthetic model finds unlikely gets a high score.
+likelihood of its SMILES string under decoder-only language models (GPT-2)
+trained on different chemical spaces. A molecule that a natural-product model
+finds likely but a synthetic model finds unlikely gets a high score.
 
 ```python
 from clamnp import CLaMNPScorer
 
-scorer = CLaMNPScorer.from_pretrained()      # downloads models from the HF Hub
-scorer.score("CC(=O)Oc1ccccc1C(=O)O")            # aspirin  -> low (synthetic-like)
-scorer.score("CN1CCC[C@H]1c1cccnc1")             # nicotine -> high (natural-like)
+scorer = CLaMNPScorer.from_pretrained()          # downloads models from the HF Hub
+scorer.score(["CC(=O)Oc1ccccc1C(=O)O",           # aspirin  -> 0.44 (synthetic-like)
+              "CN1C=NC2=C1C(=O)N(C(=O)N2C)C"])    # caffeine -> 0.59 (natural-like)
+# -> [0.44, 0.59]
 ```
-
-## How it works
-
-Each model is a small GPT-2 causal LM trained on SMILES. The perplexity
-of a SMILES under a model measures how well that molecule fits the model's
-training distribution. The **CLaM-NP Score** is a log-likelihood ratio:
-
-- **`stabilized`** (default, "CLaM-NP Score"):
-
-  ```
-  score = log P(x | natural) − log( α·P(x | synthetic) + (1−α)·P(x | general) )
-  ```
-
-  where `α` is a per-molecule gating weight and `general` is a model trained on
-  a broad bioactive set that stabilizes the denominator.
-
-- **`unstabilized`** ("CLaM-NP Score (unstabilized)"):
-
-  ```
-  score = log P(x | natural) − log P(x | synthetic)
-  ```
-
-Higher = more natural-product-like. See `clamnp/scorer.py` for the exact math.
 
 ## Installation
 
 Inference only (lightweight):
 
 ```bash
-pip install clamnp                 # from PyPI (once published)
+pip install clamnp
 pip install git+https://github.com/ohuelab/clamnp
 ```
 
@@ -74,8 +52,11 @@ clamnp "CC(=O)Oc1ccccc1C(=O)O"
 # Several molecules
 clamnp "CN1C=NC2=C1C(=O)N(C(=O)N2C)C" "O=C(O)c1ccccc1O"
 
-# A file (one SMILES per line) -> CSV, with normalized [0,1] scores
-clamnp --input molecules.smi --output scores.csv --normalized
+# A file (one SMILES per line) -> CSV
+clamnp --input molecules.smi --output scores.csv
+
+# Raw log-likelihood ratio instead of the normalized [0, 1] score
+clamnp --raw-score "CC(=O)Oc1ccccc1C(=O)O"
 
 # Unstabilized (2-model) score, on CPU
 clamnp --mode unstabilized --device cpu "CC(=O)Oc1ccccc1C(=O)O"
@@ -88,9 +69,9 @@ from clamnp import CLaMNPScorer
 
 scorer = CLaMNPScorer.from_pretrained(scoring_mode="stabilized")
 
-scorer.score("CN1CCC[C@H]1c1cccnc1")             # raw score
-scorer.score_normalized("CN1CCC[C@H]1c1cccnc1")  # sigmoid-normalized to [0, 1]
-scorer.batch_score(["CCO", "c1ccccc1"])          # list of scores
+scorer.score(["CCO", "c1ccccc1"])                # batch -> list of normalized [0, 1] scores
+scorer.score("CN1CCC[C@H]1c1cccnc1")             # single SMILES -> one score
+scorer.score(["CCO", "c1ccccc1"], raw=True)      # raw log-likelihood ratios
 scorer.score_with_details("CCO")                 # full breakdown (log P, perplexity, α, ...)
 ```
 

@@ -71,10 +71,10 @@ def score(
         "--device",
         help="Device to run on (default: cuda if available, else cpu).",
     ),
-    normalized: bool = typer.Option(
+    raw: bool = typer.Option(
         False,
-        "--normalized",
-        help="Also report the sigmoid-normalized score in [0, 1].",
+        "--raw-score",
+        help="Output the raw log-likelihood ratio instead of the normalized [0, 1] score.",
     ),
     scaffold_only: bool = typer.Option(
         False,
@@ -98,28 +98,18 @@ def score(
         scaffold_only=scaffold_only,
     )
 
-    raw_scores = scorer.batch_score(smiles_list)
-    norm_scores = (
-        [scorer._sigmoid_normalize(s) for s in raw_scores]
-        if normalized
-        else [None] * len(raw_scores)
-    )
+    scores = scorer.score(smiles_list, raw=raw)
 
     if output:
         with open(output, "w", newline="") as f:
             writer = csv.writer(f)
-            header = ["smiles", "score"] + (["score_normalized"] if normalized else [])
-            writer.writerow(header)
-            for smi, raw, norm in zip(smiles_list, raw_scores, norm_scores):
-                row = [smi, f"{raw:.6f}"] + ([f"{norm:.6f}"] if normalized else [])
-                writer.writerow(row)
+            writer.writerow(["smiles", "score"])
+            for smi, s in zip(smiles_list, scores):
+                writer.writerow([smi, f"{s:.6f}"])
         typer.echo(f"Wrote {len(smiles_list)} scores to {output}", err=True)
     else:
-        for smi, raw, norm in zip(smiles_list, raw_scores, norm_scores):
-            if normalized:
-                typer.echo(f"{raw:.4f}\t{norm:.4f}\t{smi}")
-            else:
-                typer.echo(f"{raw:.4f}\t{smi}")
+        for smi, s in zip(smiles_list, scores):
+            typer.echo(f"{s:.4f}\t{smi}")
 
 
 def main() -> None:
