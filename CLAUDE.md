@@ -1,18 +1,18 @@
 # CLAUDE.md
 
-このプロジェクトでは、天然物らしさを予測するモデルを構築します。
+This project builds a model that predicts natural-product-likeness.
 
-## データセット
+## Dataset
 
-データセットは天然物と合成化合物の SMILES 文字列のリストです。天然物に似ていて、合成化合物に似ていないものを天然物らしいとして予測することを目指します。
+The dataset is a list of SMILES strings for natural products and synthetic compounds. The goal is to predict a compound as natural-product-like when it resembles natural products but not synthetic compounds.
 
-天然物データセットは以下のようにして、COCONUT から取得できます。zip を解凍すると、CSV ファイルが得られます。CSV のカラムに"canonical_smiles"があるので、これを抽出して、データセットとすると良いでしょう。
+The natural-product dataset can be obtained from COCONUT as follows. Unzipping the archive yields a CSV file. The CSV has a `canonical_smiles` column; extract it to build the dataset.
 
 ```shell
 curl 'https://coconut.s3.uni-jena.de/prod/downloads/2025-08/coconut_csv-08-2025.zip'
 ```
 
-合成化合物データセットは以下のようにして、count, subset (none で良い) を指定して ZINC22 から取得できます。これにより得た txt ファイルには、SMILES や化合物の ID が含まれているので、SMILES のみ抽出してデータセットとします。
+The synthetic-compound dataset can be obtained from ZINC22 as follows, specifying `count` and `subset` (`none` is fine). The resulting txt file contains SMILES and compound IDs, so extract only the SMILES to build the dataset.
 
 ```shell
 curl 'https://cartblanche.docking.org/substance/random.txt' \
@@ -21,26 +21,24 @@ curl 'https://cartblanche.docking.org/substance/random.txt' \
   --data-raw $'------WebKitFormBoundary0cFylzxojzDWwpB0\r\nContent-Disposition: form-data; name="count"\r\n\r\n1000000\r\n------WebKitFormBoundary0cFylzxojzDWwpB0\r\nContent-Disposition: form-data; name="subset"\r\n\r\nnone\r\n------WebKitFormBoundary0cFylzxojzDWwpB0--\r\n'
 ```
 
-データセットは `data/` ディレクトリに保存するようにしてください。
+Save datasets under the `data/` directory.
 
-## モデル
+## Model
 
-モデルには、GPT 系の decoder-only Transformer を使用します。あるデータセットで学習した言語モデルに SMILES を入力した際の perplexity の値はその化合物が学習データセットに含まれそうかどうかの指標になります。このようにして、天然物データセットで学習したモデルと合成化合物データセットで学習したモデルを比較することで、天然物らしさを予測します。
+The model is a GPT-style decoder-only Transformer. When a SMILES is fed to a language model trained on a given dataset, its perplexity indicates how likely that compound is to belong to the training dataset. By comparing a model trained on the natural-product dataset against one trained on the synthetic-compound dataset, we predict natural-product-likeness.
 
-## スコア
+## Score
 
-天然物らしさスコアは、対数尤度比を用いて計算します。具体的には、以下の式で計算されます。
+The natural-product-likeness score is computed from a log-likelihood ratio, specifically as follows:
 
 $$
-\text{score} = = \log \frac{P(\text{natural} | x)}{P(\text{synth} | x)} \\
+\text{score} = \log \frac{P(\text{natural} | x)}{P(\text{synth} | x)} \\
 = \log \frac{P(x | \text{natural})}{P(x | \text{synth})} + \log \frac{P(\text{natural})}{P(\text{synth})} \\
 = \log P(x | \text{natural}) - \log P(x | \text{synth}) + \log \frac{P(\text{natural})}{P(\text{synth})}
 $$
 
-$\frac{P(\text{natural})}{P(\text{synth})}$ は事前確率であり、データセットのバランスに依存します。ここでは、天然物と合成化合物のデータセットが同じサイズであると仮定し、事前確率は 1 とします。公開版の CLaM-NP Score では、合成モデルの確率を汎用モデル（ChEMBL）で安定化した分母を用います。
+$\frac{P(\text{natural})}{P(\text{synth})}$ is the prior and depends on the dataset balance. Here we assume the natural-product and synthetic-compound datasets are the same size, so the prior is 1. The released CLaM-NP Score uses a denominator in which the synthetic model's probability is stabilized with a general model (ChEMBL).
 
-## 実装
+## Implementation
 
-モデルは GPT-2 系の decoder-only Transformer で、学習には transformers, pytorch-lightning を使用します（推論は Lightning 非依存）。
-ライブラリのインストールには uv を使用します。lint, format は ruff を使用し、型チェックには ty を使用します。
-ソースコードは `clamnp/` パッケージに配置し、学習用のスクリプトなどは `scripts/` ディレクトリに配置します。学習済みモデルは Hugging Face Hub (`kohbanye/clamnp`) で公開し、`clamnp` コマンドで推論できます。
+The model is a GPT-2-style decoder-only Transformer; training uses transformers and pytorch-lightning (inference is Lightning-free). Libraries are installed with uv; lint and format use ruff, and type checking uses ty. Source code lives in the `clamnp/` package, and training scripts and the like live in the `scripts/` directory. Trained models are published on the Hugging Face Hub (`kohbanye/clamnp`) and can be used for inference via the `clamnp` command.
