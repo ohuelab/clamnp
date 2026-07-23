@@ -3,17 +3,13 @@
 **C**hemical **La**nguage **M**odels for **N**atural **P**roduct-Likeness Score.
 
 CLaM-NP scores how "natural-product-like" a molecule is by comparing the
-likelihood of its SMILES string under decoder-only (GPT-2) language models
-trained on different chemical spaces. The score is in `[0, 1]` (0.5 = neutral);
-higher means more natural-product-like. Under the hood it is a sigmoid-squashed
-log-likelihood ratio (see `clamnp/scorer.py`; pass `raw=True` for the raw ratio).
+likelihood of its SMILES string under decoder-only language models (GPT-2)
+trained on different chemical spaces.
 
 ```python
 from clamnp import CLaMNPScorer
 
 scorer = CLaMNPScorer.from_pretrained()          # downloads models from the HF Hub
-
-# Pass a list to score in one fast batched pass
 scorer.score(["CC(=O)Oc1ccccc1C(=O)O",           # aspirin  -> 0.44 (synthetic-like)
               "CN1C=NC2=C1C(=O)N(C(=O)N2C)C"])    # caffeine -> 0.59 (natural-like)
 # -> [0.44, 0.59]
@@ -64,9 +60,6 @@ clamnp --raw-score "CC(=O)Oc1ccccc1C(=O)O"
 # Unstabilized (2-model) score, on CPU
 clamnp --mode unstabilized --device cpu "CC(=O)Oc1ccccc1C(=O)O"
 ```
-
-By default `clamnp` prints the normalized `[0, 1]` score; pass `--raw-score` for
-the raw log-likelihood ratio.
 
 ### Python
 
