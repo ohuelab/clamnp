@@ -27,8 +27,6 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      # ty resolves imports against the installed environment, so the
-      # dependencies (torch, transformers, rdkit, ...) must be present.
       - name: Install dependencies
         run: uv sync
       - name: ty
