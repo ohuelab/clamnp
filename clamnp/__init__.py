@@ -27,7 +27,7 @@ from .constants import (
 from .scorer import CLaMNPScorer
 from .scoring import HFLanguageModel, LogLikelihoodMixin
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "CLaMNPScorer",
