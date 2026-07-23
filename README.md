@@ -4,7 +4,8 @@
 
 CLaM-NP scores how "natural-product-like" a molecule is by comparing the
 likelihood of its SMILES string under decoder-only language models (GPT-2)
-trained on different chemical spaces.
+trained on different chemical spaces. A molecule that a natural-product model
+finds likely but a synthetic model finds unlikely gets a high score.
 
 ```python
 from clamnp import CLaMNPScorer
