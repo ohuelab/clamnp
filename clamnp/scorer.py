@@ -91,14 +91,17 @@ class CLaMNPScorer:
                 f"Invalid scoring_mode: {scoring_mode}. Must be one of {SCORING_MODES}"
             )
 
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        resolved_device: str | torch.device = (
+            device
+            if device is not None
+            else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
 
         def _load(subfolder: str) -> HFLanguageModel:
             return HFLanguageModel.from_pretrained(
                 repo_id,
                 subfolder=subfolder,
-                device=device,
+                device=resolved_device,
                 max_length=max_length,
                 tokenizer_name=tokenizer_name,
             )

@@ -109,8 +109,8 @@ def calculate_diversity_metrics(
         try:
             mol = Chem.MolFromSmiles(smiles)
             if mol is not None:
-                mol_weights.append(Descriptors.MolWt(mol))
-                logps.append(Descriptors.MolLogP(mol))
+                mol_weights.append(Descriptors.MolWt(mol))  # ty: ignore[unresolved-attribute]
+                logps.append(Descriptors.MolLogP(mol))  # ty: ignore[unresolved-attribute]
         except Exception:
             continue
 
@@ -195,7 +195,7 @@ def _calculate_molecular_weight_chunk(
         try:
             mol = Chem.MolFromSmiles(smiles)
             if mol is not None:
-                mw = Descriptors.MolWt(mol)
+                mw = Descriptors.MolWt(mol)  # ty: ignore[unresolved-attribute]
                 results.append((idx, mw))
         except Exception:
             continue
