@@ -4,16 +4,19 @@
 
 CLaM-NP scores how "natural-product-like" a molecule is by comparing the
 likelihood of its SMILES string under decoder-only (GPT-2) language models
-trained on different chemical spaces. The score is a log-likelihood ratio:
-positive means more natural-product-like, negative more synthetic-like
-(see `clamnp/scorer.py` for the exact definition).
+trained on different chemical spaces. The score is in `[0, 1]` (0.5 = neutral);
+higher means more natural-product-like. Under the hood it is a sigmoid-squashed
+log-likelihood ratio (see `clamnp/scorer.py`; pass `raw=True` for the raw ratio).
 
 ```python
 from clamnp import CLaMNPScorer
 
-scorer = CLaMNPScorer.from_pretrained()      # downloads models from the HF Hub
-scorer.score("CC(=O)Oc1ccccc1C(=O)O")        # aspirin  -> -0.12 (low; synthetic-like)
-scorer.score("CN1C=NC2=C1C(=O)N(C(=O)N2C)C") # caffeine -> +0.17 (high; natural-like)
+scorer = CLaMNPScorer.from_pretrained()          # downloads models from the HF Hub
+
+# Pass a list to score in one fast batched pass
+scorer.score(["CC(=O)Oc1ccccc1C(=O)O",           # aspirin  -> 0.44 (synthetic-like)
+              "CN1C=NC2=C1C(=O)N(C(=O)N2C)C"])    # caffeine -> 0.59 (natural-like)
+# -> [0.44, 0.59]
 ```
 
 ## Installation
@@ -52,15 +55,18 @@ clamnp "CC(=O)Oc1ccccc1C(=O)O"
 # Several molecules
 clamnp "CN1C=NC2=C1C(=O)N(C(=O)N2C)C" "O=C(O)c1ccccc1O"
 
-# A file (one SMILES per line) -> CSV, with normalized [0,1] scores
-clamnp --input molecules.smi --output scores.csv --normalized
+# A file (one SMILES per line) -> CSV
+clamnp --input molecules.smi --output scores.csv
+
+# Raw log-likelihood ratio instead of the normalized [0, 1] score
+clamnp --raw-score "CC(=O)Oc1ccccc1C(=O)O"
 
 # Unstabilized (2-model) score, on CPU
 clamnp --mode unstabilized --device cpu "CC(=O)Oc1ccccc1C(=O)O"
 ```
 
-By default `clamnp` prints the raw log-likelihood ratio; pass `--normalized` to
-also get a sigmoid-squashed value in `[0, 1]`.
+By default `clamnp` prints the normalized `[0, 1]` score; pass `--raw-score` for
+the raw log-likelihood ratio.
 
 ### Python
 
@@ -69,9 +75,9 @@ from clamnp import CLaMNPScorer
 
 scorer = CLaMNPScorer.from_pretrained(scoring_mode="stabilized")
 
-scorer.score("CN1CCC[C@H]1c1cccnc1")             # raw score (default)
-scorer.score_normalized("CN1CCC[C@H]1c1cccnc1")  # sigmoid-normalized to [0, 1]
-scorer.batch_score(["CCO", "c1ccccc1"])          # list of scores
+scorer.score(["CCO", "c1ccccc1"])                # batch -> list of normalized [0, 1] scores
+scorer.score("CN1CCC[C@H]1c1cccnc1")             # single SMILES -> one score
+scorer.score(["CCO", "c1ccccc1"], raw=True)      # raw log-likelihood ratios
 scorer.score_with_details("CCO")                 # full breakdown (log P, perplexity, α, ...)
 ```
 
