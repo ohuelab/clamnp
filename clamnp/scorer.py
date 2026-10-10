@@ -149,6 +149,20 @@ class CLaMNPScorer:
 
         return Chem.MolToSmiles(mol, doRandom=False, canonical=True)
 
+    def _enumerate_smiles(self, smiles: str, n: int, seed: int) -> list[str]:
+        """``n`` randomized SMILES for one molecule, deterministic given ``seed``."""
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError(f"Invalid SMILES: {smiles}")
+        if self.scaffold_only:
+            try:
+                mol = MurckoScaffold.GetScaffoldForMol(mol)
+            except Exception:
+                pass
+        # Same writings as training's MolToSmiles(doRandom=True), but from a seeded
+        # generator; doRandom draws from RDKit's global RNG and cannot be seeded.
+        return list(Chem.MolToRandomSmilesVect(mol, n, randomSeed=seed))
+
     def _calculate_dynamic_alpha(
         self, log_p_synthetic: float, log_p_general: float
     ) -> float:
@@ -238,12 +252,22 @@ class CLaMNPScorer:
             raise ValueError(f"Invalid scoring_mode: {self.scoring_mode}")
 
     @overload
-    def score(self, smiles: str, raw: bool = ...) -> float: ...
+    def score(
+        self, smiles: str, raw: bool = ..., n_enum: int = ..., seed: int = ...
+    ) -> float: ...
 
     @overload
-    def score(self, smiles: list[str], raw: bool = ...) -> list[float]: ...
+    def score(
+        self, smiles: list[str], raw: bool = ..., n_enum: int = ..., seed: int = ...
+    ) -> list[float]: ...
 
-    def score(self, smiles: str | list[str], raw: bool = False) -> float | list[float]:
+    def score(
+        self,
+        smiles: str | list[str],
+        raw: bool = False,
+        n_enum: int = 0,
+        seed: int = 0,
+    ) -> float | list[float]:
         """Calculate the CLaM-NP Score for one or more SMILES strings.
 
         Pass a list of SMILES to score them in a single batched forward pass
@@ -253,16 +277,59 @@ class CLaMNPScorer:
         Returns the sigmoid-normalized score in [0, 1] (0.5 = neutral, higher =
         more natural-product-like). Pass ``raw=True`` for the underlying raw
         log-likelihood ratio instead (unbounded; positive = more natural-like).
+
+        ``n_enum`` averages the raw score over that many randomized SMILES of the
+        same molecule instead of scoring its canonical form once. An
+        autoregressive likelihood depends on the order the atoms are written in,
+        and for a single molecule that spread is not negligible -- the median
+        range across ~51 enumerations is 0.151 on the [0, 1] scale -- so the
+        average is the better estimate when individual values are compared.
+        Cost and precision both scale with ``n_enum``: the standard error of the
+        mean falls as 1/sqrt(n_enum) while the forward passes grow linearly.
+        ``n_enum=0`` (the default) keeps the canonical-SMILES behaviour. The
+        average is taken over raw scores, before the sigmoid, because the sigmoid
+        is non-linear and averaging after it would bias the result toward 0.5.
         """
+        if n_enum < 0:
+            raise ValueError("n_enum must be >= 0")
+
         if isinstance(smiles, str):
-            raw_score = self._score_raw(smiles)
+            if n_enum:
+                variants = self._enumerate_smiles(smiles, n_enum, seed)
+                values = self._batch_score_processed(variants)
+                raw_score = sum(values) / len(values)
+            else:
+                raw_score = self._score_raw(smiles)
             return raw_score if raw else self._sigmoid_normalize(raw_score)
-        raw_scores = self._batch_score_raw(list(smiles))
+
+        smiles = list(smiles)
+        if n_enum:
+            # One flat batch over every enumeration of every molecule, then regrouped.
+            flat: list[str] = []
+            for s in smiles:
+                flat.extend(self._enumerate_smiles(s, n_enum, seed))
+            values = self._batch_score_processed(flat)
+            raw_scores = [
+                sum(values[i * n_enum : (i + 1) * n_enum]) / n_enum
+                for i in range(len(smiles))
+            ]
+        else:
+            raw_scores = self._batch_score_raw(smiles)
         return raw_scores if raw else [self._sigmoid_normalize(s) for s in raw_scores]
 
     def _batch_score_raw(self, smiles_list: list[str]) -> list[float]:
         """Raw NP-likeness scores for a batch of SMILES strings."""
-        smiles_list = [self._process_smiles(smiles) for smiles in smiles_list]
+        return self._batch_score_processed(
+            [self._process_smiles(smiles) for smiles in smiles_list]
+        )
+
+    def _batch_score_processed(self, smiles_list: list[str]) -> list[float]:
+        """Raw scores for strings that are already in the form to be fed to the models.
+
+        Separate from :meth:`_batch_score_raw` so that enumerated SMILES reach the
+        models as written: canonicalising them first would collapse every
+        enumeration of a molecule back onto one string.
+        """
 
         if self.scoring_mode == "unstabilized":
             log_p_natural_list = self.natural_model.batch_calculate_log_likelihood(
