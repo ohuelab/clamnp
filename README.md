@@ -11,9 +11,9 @@ finds likely but a synthetic model finds unlikely gets a high score.
 from clamnp import CLaMNPScorer
 
 scorer = CLaMNPScorer.from_pretrained()          # downloads models from the HF Hub
-scorer.score(["CC(=O)Oc1ccccc1C(=O)O",           # aspirin  -> 0.44 (synthetic-like)
-              "CN1C=NC2=C1C(=O)N(C(=O)N2C)C"])    # caffeine -> 0.59 (natural-like)
-# -> [0.44, 0.59]
+scorer.score(["COc1cc2ncnc(Nc3ccc(F)c(Cl)c3)c2cc1OCCCN1CCOCC1",            # gefitinib
+              "CN1CC[C@]23c4c5ccc(O)c4O[C@H]2[C@@H](O)C=C[C@H]3[C@H]1C5"])  # morphine
+# -> [0.14, 0.67]   (synthetic-like, natural-like)
 ```
 
 ## Installation
