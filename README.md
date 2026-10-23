@@ -60,6 +60,9 @@ clamnp --raw-score "CC(=O)Oc1ccccc1C(=O)O"
 
 # Unstabilized (2-model) score, on CPU
 clamnp --mode unstabilized --device cpu "CC(=O)Oc1ccccc1C(=O)O"
+
+# Average over 32 randomized SMILES instead of scoring the canonical form once
+clamnp --n-enum 32 "CC(=O)Oc1ccccc1C(=O)O"
 ```
 
 ### Python
@@ -73,6 +76,19 @@ scorer.score(["CCO", "c1ccccc1"])                # batch -> list of normalized [
 scorer.score("CN1CCC[C@H]1c1cccnc1")             # single SMILES -> one score
 scorer.score(["CCO", "c1ccccc1"], raw=True)      # raw log-likelihood ratios
 scorer.score_with_details("CCO")                 # full breakdown (log P, perplexity, α, ...)
+```
+
+### Averaging over randomized SMILES
+
+A language model reads a SMILES string in one particular atom order, so the score
+of a single molecule moves a little with how it is written. Pass `n_enum` to
+average over that many randomized SMILES instead of scoring the canonical form
+once. This is worth doing when individual values are compared; for ranking a
+large set the canonical score is usually enough. The cost grows linearly with
+`n_enum`, and `seed` makes the enumeration reproducible.
+
+```python
+scorer.score(["CCO", "c1ccccc1"], n_enum=32)     # mean over 32 randomized SMILES
 ```
 
 ## Models
