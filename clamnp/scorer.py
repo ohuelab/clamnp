@@ -133,8 +133,8 @@ class CLaMNPScorer:
         except Exception:
             return smiles  # Return original if scaffold extraction fails
 
-    def _process_smiles(self, smiles: str) -> str:
-        """Process SMILES with optional scaffold extraction."""
+    def _validate_and_canonicalize(self, smiles: str) -> str:
+        """Canonical SMILES of the molecule (or its scaffold), or ValueError if invalid."""
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             raise ValueError(f"Invalid SMILES: {smiles}")
@@ -223,7 +223,7 @@ class CLaMNPScorer:
         Unbounded; positive = more natural-product-like, negative = more
         synthetic/general-like.
         """
-        smiles = self._process_smiles(smiles)
+        smiles = self._validate_and_canonicalize(smiles)
 
         if self.scoring_mode == "unstabilized":
             log_p_natural = self.natural_model._calculate_log_likelihood(smiles)
@@ -309,7 +309,7 @@ class CLaMNPScorer:
     def _batch_score_raw(self, smiles_list: list[str]) -> list[float]:
         """Raw NP-likeness scores for a batch of SMILES strings."""
         return self._batch_score_processed(
-            [self._process_smiles(smiles) for smiles in smiles_list]
+            [self._validate_and_canonicalize(smiles) for smiles in smiles_list]
         )
 
     def _batch_score_processed(self, smiles_list: list[str]) -> list[float]:
@@ -393,7 +393,7 @@ class CLaMNPScorer:
         - perplexity_general: Perplexity under general model
         - log_mixture / dynamic_alpha: only when scoring_mode='stabilized'
         """
-        smiles = self._process_smiles(smiles)
+        smiles = self._validate_and_canonicalize(smiles)
 
         log_p_natural = self.natural_model._calculate_log_likelihood(smiles)
         log_p_synthetic = self.synthetic_model._calculate_log_likelihood(smiles)
