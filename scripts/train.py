@@ -84,6 +84,12 @@ def parse_args():
     parser.add_argument(
         "--num_workers", type=int, default=4, help="Number of data loader workers"
     )
+    parser.add_argument(
+        "--split_workers",
+        type=int,
+        default=16,
+        help="Processes for building the joint scaffold split (first run only)",
+    )
 
     # Tokenizer arguments
     parser.add_argument(
@@ -241,6 +247,8 @@ def main():
         randomize=args.randomize,
         canonical=args.canonical,
         scaffold_only=args.scaffold_only,
+        seed=args.seed,
+        split_workers=args.split_workers,
     )
 
     # Initialize model

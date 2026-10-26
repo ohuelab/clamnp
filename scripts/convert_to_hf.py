@@ -61,7 +61,8 @@ The three models are trained on a joint scaffold split: the scaffolds of all thr
 datasets are pooled and clustered together (ECFP4 Tanimoto >= 0.6), and each
 cluster goes to a single split, so no scaffold is shared between the training data
 of one dataset and the evaluation data of another. The split is built by
-[`scripts/joint_split.py`](https://github.com/ohuelab/clamnp/blob/main/scripts/joint_split.py).
+`SMILESDataModule` in
+[`clamnp/data.py`](https://github.com/ohuelab/clamnp/blob/main/clamnp/data.py).
 
 - `natural`: COCONUT, August 2025 release (`coconut_csv-08-2025.zip`)
 - `synthetic`: 700,000 compounds drawn at random from ZINC 22. A random draw

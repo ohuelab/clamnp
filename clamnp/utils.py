@@ -17,9 +17,13 @@ class UnionFind:
         self.rank: list[int] = [0] * n
 
     def find(self, x: int) -> int:
-        if self.parent[x] != x:
-            self.parent[x] = self.find(self.parent[x])
-        return self.parent[x]
+        # Iterative with path halving: recursion runs out of stack on the long
+        # chains that clustering hundreds of thousands of scaffolds produces.
+        parent = self.parent
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
 
     def union(self, x: int, y: int) -> None:
         px, py = self.find(x), self.find(y)
