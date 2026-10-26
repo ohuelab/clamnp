@@ -278,17 +278,8 @@ class CLaMNPScorer:
         more natural-product-like). Pass ``raw=True`` for the underlying raw
         log-likelihood ratio instead (unbounded; positive = more natural-like).
 
-        ``n_enum`` averages the raw score over that many randomized SMILES of the
-        same molecule instead of scoring its canonical form once. An
-        autoregressive likelihood depends on the order the atoms are written in,
-        and for a single molecule that spread is not negligible -- the median
-        range across ~51 enumerations is 0.151 on the [0, 1] scale -- so the
-        average is the better estimate when individual values are compared.
-        Cost and precision both scale with ``n_enum``: the standard error of the
-        mean falls as 1/sqrt(n_enum) while the forward passes grow linearly.
-        ``n_enum=0`` (the default) keeps the canonical-SMILES behaviour. The
-        average is taken over raw scores, before the sigmoid, because the sigmoid
-        is non-linear and averaging after it would bias the result toward 0.5.
+        ``n_enum`` > 0 averages the raw score over that many randomized SMILES
+        (seeded by ``seed``) instead of scoring the canonical SMILES once.
         """
         if n_enum < 0:
             raise ValueError("n_enum must be >= 0")
