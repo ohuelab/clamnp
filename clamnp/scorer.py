@@ -284,29 +284,27 @@ class CLaMNPScorer:
         if n_enum < 0:
             raise ValueError("n_enum must be >= 0")
 
-        if isinstance(smiles, str):
-            if n_enum:
-                variants = self._enumerate_smiles(smiles, n_enum, seed)
-                values = self._batch_score_processed(variants)
-                raw_score = sum(values) / len(values)
-            else:
-                raw_score = self._score_raw(smiles)
-            return raw_score if raw else self._sigmoid_normalize(raw_score)
+        single = isinstance(smiles, str)
+        smiles_list = [smiles] if single else list(smiles)
+        raw_scores = self._raw_scores(smiles_list, n_enum, seed)
+        scores = raw_scores if raw else [self._sigmoid_normalize(s) for s in raw_scores]
+        return scores[0] if single else scores
 
-        smiles = list(smiles)
-        if n_enum:
-            # One flat batch over every enumeration of every molecule, then regrouped.
-            flat: list[str] = []
-            for s in smiles:
-                flat.extend(self._enumerate_smiles(s, n_enum, seed))
-            values = self._batch_score_processed(flat)
-            raw_scores = [
-                sum(values[i * n_enum : (i + 1) * n_enum]) / n_enum
-                for i in range(len(smiles))
-            ]
-        else:
-            raw_scores = self._batch_score_raw(smiles)
-        return raw_scores if raw else [self._sigmoid_normalize(s) for s in raw_scores]
+    def _raw_scores(
+        self, smiles_list: list[str], n_enum: int, seed: int
+    ) -> list[float]:
+        """One raw score per molecule, averaged over ``n_enum`` writings if > 0."""
+        if not n_enum:
+            return self._batch_score_raw(smiles_list)
+        # One flat batch over every writing of every molecule, then regrouped. The
+        # mean is over raw scores, before the sigmoid, which would bias it to 0.5.
+        writings = [
+            w for s in smiles_list for w in self._enumerate_smiles(s, n_enum, seed)
+        ]
+        values = self._batch_score_processed(writings)
+        return [
+            sum(values[i : i + n_enum]) / n_enum for i in range(0, len(values), n_enum)
+        ]
 
     def _batch_score_raw(self, smiles_list: list[str]) -> list[float]:
         """Raw NP-likeness scores for a batch of SMILES strings."""
