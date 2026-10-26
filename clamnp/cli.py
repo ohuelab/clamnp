@@ -13,6 +13,9 @@ Examples::
 
     # Use the unstabilized (2-model) score instead of the default
     clamnp --mode unstabilized "CC(=O)Oc1ccccc1C(=O)O"
+
+    # Average over 32 randomized SMILES instead of scoring the canonical form once
+    clamnp --n-enum 32 "CC(=O)Oc1ccccc1C(=O)O"
 """
 
 from __future__ import annotations
@@ -81,6 +84,16 @@ def score(
         "--scaffold-only",
         help="Score the Bemis-Murcko scaffold instead of the whole molecule.",
     ),
+    n_enum: int = typer.Option(
+        0,
+        "--n-enum",
+        min=0,
+        help="Average over this many randomized SMILES per molecule "
+        "(0 = score the canonical SMILES once).",
+    ),
+    seed: int = typer.Option(
+        0, "--seed", help="Seed for the randomized SMILES used by --n-enum."
+    ),
 ) -> None:
     """Score molecules for natural-product-likeness (CLaM-NP Score)."""
     smiles_list = _read_smiles_file(input) if input else list(smiles or [])
@@ -98,7 +111,7 @@ def score(
         scaffold_only=scaffold_only,
     )
 
-    scores = scorer.score(smiles_list, raw=raw)
+    scores = scorer.score(smiles_list, raw=raw, n_enum=n_enum, seed=seed)
 
     if output:
         with open(output, "w", newline="") as f:

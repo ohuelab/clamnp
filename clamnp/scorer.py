@@ -21,6 +21,7 @@ from .constants import (
     SCORING_MODES,
 )
 from .scoring import HFLanguageModel, LogLikelihoodMixin
+from .utils import randomize_smiles
 
 
 class CLaMNPScorer:
@@ -133,8 +134,8 @@ class CLaMNPScorer:
         except Exception:
             return smiles  # Return original if scaffold extraction fails
 
-    def _process_smiles(self, smiles: str) -> str:
-        """Process SMILES with optional scaffold extraction."""
+    def _validate_and_canonicalize(self, smiles: str) -> str:
+        """Canonical SMILES of the molecule (or its scaffold), or ValueError if invalid."""
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             raise ValueError(f"Invalid SMILES: {smiles}")
@@ -209,7 +210,7 @@ class CLaMNPScorer:
         Unbounded; positive = more natural-product-like, negative = more
         synthetic/general-like.
         """
-        smiles = self._process_smiles(smiles)
+        smiles = self._validate_and_canonicalize(smiles)
 
         if self.scoring_mode == "unstabilized":
             log_p_natural = self.natural_model._calculate_log_likelihood(smiles)
@@ -238,12 +239,22 @@ class CLaMNPScorer:
             raise ValueError(f"Invalid scoring_mode: {self.scoring_mode}")
 
     @overload
-    def score(self, smiles: str, raw: bool = ...) -> float: ...
+    def score(
+        self, smiles: str, raw: bool = ..., n_enum: int = ..., seed: int = ...
+    ) -> float: ...
 
     @overload
-    def score(self, smiles: list[str], raw: bool = ...) -> list[float]: ...
+    def score(
+        self, smiles: list[str], raw: bool = ..., n_enum: int = ..., seed: int = ...
+    ) -> list[float]: ...
 
-    def score(self, smiles: str | list[str], raw: bool = False) -> float | list[float]:
+    def score(
+        self,
+        smiles: str | list[str],
+        raw: bool = False,
+        n_enum: int = 0,
+        seed: int = 0,
+    ) -> float | list[float]:
         """Calculate the CLaM-NP Score for one or more SMILES strings.
 
         Pass a list of SMILES to score them in a single batched forward pass
@@ -253,17 +264,35 @@ class CLaMNPScorer:
         Returns the sigmoid-normalized score in [0, 1] (0.5 = neutral, higher =
         more natural-product-like). Pass ``raw=True`` for the underlying raw
         log-likelihood ratio instead (unbounded; positive = more natural-like).
+
+        ``n_enum`` > 0 averages the raw score over that many randomized SMILES
+        (seeded by ``seed``) instead of scoring the canonical SMILES once.
         """
-        if isinstance(smiles, str):
-            raw_score = self._score_raw(smiles)
-            return raw_score if raw else self._sigmoid_normalize(raw_score)
-        raw_scores = self._batch_score_raw(list(smiles))
-        return raw_scores if raw else [self._sigmoid_normalize(s) for s in raw_scores]
+        if n_enum < 0:
+            raise ValueError("n_enum must be >= 0")
+
+        single = isinstance(smiles, str)
+        molecules = [
+            self._validate_and_canonicalize(s) for s in ([smiles] if single else smiles)
+        ]
+        # n_enum only changes what is fed to the models: each molecule's canonical
+        # SMILES, or n_enum randomized writings of it, averaged back below.
+        if n_enum:
+            inputs = [w for m in molecules for w in randomize_smiles(m, n_enum, seed)]
+        else:
+            inputs = molecules
+        values = self._batch_score_raw(inputs)
+        per_molecule = max(n_enum, 1)
+        # Averaged on the raw scale: the sigmoid would pull the mean towards 0.5.
+        raw_scores = [
+            sum(values[i : i + per_molecule]) / per_molecule
+            for i in range(0, len(values), per_molecule)
+        ]
+        scores = raw_scores if raw else [self._sigmoid_normalize(s) for s in raw_scores]
+        return scores[0] if single else scores
 
     def _batch_score_raw(self, smiles_list: list[str]) -> list[float]:
-        """Raw NP-likeness scores for a batch of SMILES strings."""
-        smiles_list = [self._process_smiles(smiles) for smiles in smiles_list]
-
+        """Raw scores for a batch of SMILES, fed to the models as written."""
         if self.scoring_mode == "unstabilized":
             log_p_natural_list = self.natural_model.batch_calculate_log_likelihood(
                 smiles_list
@@ -337,7 +366,7 @@ class CLaMNPScorer:
         - perplexity_general: Perplexity under general model
         - log_mixture / dynamic_alpha: only when scoring_mode='stabilized'
         """
-        smiles = self._process_smiles(smiles)
+        smiles = self._validate_and_canonicalize(smiles)
 
         log_p_natural = self.natural_model._calculate_log_likelihood(smiles)
         log_p_synthetic = self.synthetic_model._calculate_log_likelihood(smiles)

@@ -11,9 +11,9 @@ finds likely but a synthetic model finds unlikely gets a high score.
 from clamnp import CLaMNPScorer
 
 scorer = CLaMNPScorer.from_pretrained()          # downloads models from the HF Hub
-scorer.score(["CC(=O)Oc1ccccc1C(=O)O",           # aspirin  -> 0.44 (synthetic-like)
-              "CN1C=NC2=C1C(=O)N(C(=O)N2C)C"])    # caffeine -> 0.59 (natural-like)
-# -> [0.44, 0.59]
+scorer.score(["COc1cc2ncnc(Nc3ccc(F)c(Cl)c3)c2cc1OCCCN1CCOCC1",            # gefitinib
+              "CN1CC[C@]23c4c5ccc(O)c4O[C@H]2[C@@H](O)C=C[C@H]3[C@H]1C5"])  # morphine
+# -> [0.14, 0.67]   (synthetic-like, natural-like)
 ```
 
 ## Installation
@@ -60,6 +60,9 @@ clamnp --raw-score "CC(=O)Oc1ccccc1C(=O)O"
 
 # Unstabilized (2-model) score, on CPU
 clamnp --mode unstabilized --device cpu "CC(=O)Oc1ccccc1C(=O)O"
+
+# Average over 32 randomized SMILES instead of scoring the canonical form once
+clamnp --n-enum 32 "CC(=O)Oc1ccccc1C(=O)O"
 ```
 
 ### Python
@@ -72,6 +75,7 @@ scorer = CLaMNPScorer.from_pretrained(scoring_mode="stabilized")
 scorer.score(["CCO", "c1ccccc1"])                # batch -> list of normalized [0, 1] scores
 scorer.score("CN1CCC[C@H]1c1cccnc1")             # single SMILES -> one score
 scorer.score(["CCO", "c1ccccc1"], raw=True)      # raw log-likelihood ratios
+scorer.score(["CCO", "c1ccccc1"], n_enum=32)     # mean over 32 randomized SMILES
 scorer.score_with_details("CCO")                 # full breakdown (log P, perplexity, α, ...)
 ```
 

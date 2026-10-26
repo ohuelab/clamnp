@@ -1,4 +1,6 @@
 import csv
+import json
+import multiprocessing as mp
 import zipfile
 from pathlib import Path
 
@@ -85,52 +87,202 @@ class SMILESDataset(Dataset):
         }
 
 
-class SMILESDataModule(L.LightningDataModule):
+DATASET_TYPES = ("natural", "synthetic", "general")
+# A structure in both class datasets cannot be both a positive and a negative.
+# ChEMBL is left alone: the general model is meant to overlap both classes.
+CLASS_DATASETS = ("natural", "synthetic")
+SPLITS = ("train", "val", "test")
+
+# Populated in the parent before forking scan workers, which inherit it copy-on-write.
+_FPS: list = []
+
+
+def _keys(smiles: str) -> tuple[str, str] | None:
+    """Stereo-free canonical SMILES and chirality-free Bemis-Murcko scaffold."""
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    try:
+        scaffold = Chem.MolToSmiles(
+            MurckoScaffold.GetScaffoldForMol(mol), isomericSmiles=False
+        )
+    except Exception:
+        scaffold = ""
+    return Chem.MolToSmiles(mol, isomericSmiles=False), scaffold
+
+
+def _scan(args: tuple[int, int, int, float]) -> list[int]:
+    """Union every scaffold pair at or above the threshold, for a strided slice."""
+    start, stride, n, threshold = args
+    uf = UnionFind(n)
+    for i in range(start, n, stride):
+        tail = _FPS[i + 1 :]
+        if not tail:
+            continue
+        for offset, sim in enumerate(DataStructs.BulkTanimotoSimilarity(_FPS[i], tail)):
+            if sim >= threshold:
+                uf.union(i, i + 1 + offset)
+    return [uf.find(i) for i in range(n)]
+
+
+def cluster_scaffolds(
+    scaffolds: list[str], threshold: float, workers: int
+) -> list[int]:
+    """Cluster scaffolds by ECFP4 Tanimoto >= threshold, merged transitively."""
+    global _FPS
+    mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+    _FPS = []
+    for scaffold in tqdm(scaffolds, desc="Fingerprinting scaffolds"):
+        mol = Chem.MolFromSmiles(scaffold) if scaffold else None
+        _FPS.append(
+            mfpgen.GetFingerprint(mol) if mol else DataStructs.ExplicitBitVect(2048)
+        )
+    n = len(scaffolds)
+    uf = UnionFind(n)
+    with mp.Pool(workers) as pool:
+        for roots in tqdm(
+            pool.imap_unordered(
+                _scan, [(w, workers, n, threshold) for w in range(workers)]
+            ),
+            total=workers,
+            desc="Comparing scaffolds",
+        ):
+            # Merging each worker's partition gives the transitive closure over the
+            # union of the edges they each saw.
+            for i, r in enumerate(roots):
+                if r != i:
+                    uf.union(i, r)
+    # Numbered by first member, so the labels do not depend on worker order.
+    return uf.get_clusters()
+
+
+class SplitManager:
+    """Prepares the three datasets and splits them jointly by scaffold cluster.
+
+    Run :meth:`prepare` once before training (``scripts/prepare_data.py``).
+    """
+
     def __init__(
         self,
-        data_dir: str = "./data",
-        tokenizer_name: str = "kohbanye/SmilesTokenizer_PubChem_1M",
-        batch_size: int = 32,
-        max_length: int = 512,
-        num_workers: int = 4,
+        data_dir: str | Path = "./data",
+        max_samples: int | None = None,
+        threshold: float = 0.6,
         val_split: float = 0.1,
         test_split: float = 0.1,
-        dataset_type: str = "natural",  # "natural" or "synthetic"
-        max_samples: int | None = None,
-        randomize: bool = False,
-        canonical: bool = False,
-        similarity_threshold: float = 0.6,
-        scaffold_only: bool = False,
+        seed: int = 42,
+        workers: int = 16,
     ):
-        super().__init__()
         self.data_dir = Path(data_dir)
-        self.tokenizer_name = tokenizer_name
-        self.batch_size = batch_size
-        self.max_length = max_length
-        self.num_workers = num_workers
+        self.max_samples = max_samples
+        self.threshold = threshold
         self.val_split = val_split
         self.test_split = test_split
-        self.dataset_type = dataset_type
-        self.max_samples = max_samples
-        self.randomize = randomize
-        self.canonical = canonical
-        self.similarity_threshold = similarity_threshold
-        self.scaffold_only = scaffold_only
+        self.seed = seed
+        self.workers = workers
 
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+    def prepare(self) -> None:
+        """Write each dataset's SMILES and the joint split, unless they exist."""
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        for dataset_type in DATASET_TYPES:
+            self._prepare_dataset(dataset_type)
+        if all(self._split_file(d, p).exists() for d in DATASET_TYPES for p in SPLITS):
+            return
 
-        self.collate_fn = DataCollatorForLanguageModeling(
-            tokenizer=self.tokenizer,
-            mlm=False,
+        smiles_by_dataset = {}
+        for dataset_type in DATASET_TYPES:
+            with open(self.data_dir / f"{dataset_type}_all.smi") as f:
+                smiles_by_dataset[dataset_type] = [line.strip() for line in f]
+        splits, summary = self._split(smiles_by_dataset)
+        for dataset_type, parts in splits.items():
+            for part, smiles_list in parts.items():
+                with open(self._split_file(dataset_type, part), "w") as f:
+                    f.writelines(s + "\n" for s in smiles_list)
+        (self.data_dir / "joint_split.json").write_text(
+            json.dumps(summary, indent=2) + "\n"
         )
+        print(f"Saved joint splits: {summary['split_sizes']}")
 
-        self.mfpgen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+    def load(self, dataset_type: str) -> dict[str, list[str]]:
+        """Train, val and test SMILES of one dataset."""
+        if not all(self._split_file(dataset_type, p).exists() for p in SPLITS):
+            self.prepare()
+        smiles = {}
+        for part in SPLITS:
+            with open(self._split_file(dataset_type, part)) as f:
+                smiles[part] = [line.strip() for line in f]
+        return smiles
 
-        self.data_dir.mkdir(exist_ok=True)
+    def _split_file(self, dataset_type: str, part: str) -> Path:
+        return self.data_dir / f"{dataset_type}_{part}.smi"
 
-    def _standardize_smiles(self, smiles: str) -> str:
+    def _split(
+        self, smiles_by_dataset: dict[str, list[str]]
+    ) -> tuple[dict[str, dict[str, list[str]]], dict]:
+        """Split all datasets jointly; returns the splits and a summary."""
+        datasets, smiles, flats, scaffolds = [], [], [], []
+        with mp.Pool(self.workers) as pool:
+            for name, items in smiles_by_dataset.items():
+                seen: set[str] = set()
+                keys = pool.map(_keys, items, chunksize=500)
+                for s, k in zip(items, keys):
+                    if k is None or s in seen:
+                        continue
+                    seen.add(s)
+                    datasets.append(name)
+                    smiles.append(s)
+                    flats.append(k[0])
+                    scaffolds.append(k[1])
+
+        in_classes: dict[str, set[str]] = {}
+        for d, f in zip(datasets, flats):
+            if d in CLASS_DATASETS:
+                in_classes.setdefault(f, set()).add(d)
+        shared = {f for f, ds in in_classes.items() if len(ds) > 1}
+        keep = [
+            i
+            for i, (d, f) in enumerate(zip(datasets, flats))
+            if not (d in CLASS_DATASETS and f in shared)
+        ]
+        datasets = [datasets[i] for i in keep]
+        smiles = [smiles[i] for i in keep]
+        scaffolds = [scaffolds[i] for i in keep]
+
+        unique = list(dict.fromkeys(scaffolds))
+        label_of = dict(
+            zip(unique, cluster_scaffolds(unique, self.threshold, self.workers))
+        )
+        groups = np.array([label_of[s] for s in scaffolds])
+
+        holdout = self.val_split + self.test_split
+        gss = GroupShuffleSplit(n_splits=1, test_size=holdout, random_state=self.seed)
+        _, rest = next(gss.split(np.arange(len(smiles)), groups=groups))
+        gss = GroupShuffleSplit(
+            n_splits=1, test_size=1 - self.val_split / holdout, random_state=self.seed
+        )
+        val_local, test_local = next(gss.split(rest, groups=groups[rest]))
+        part = np.full(len(smiles), "train", dtype=object)
+        part[rest[val_local]] = "val"
+        part[rest[test_local]] = "test"
+
+        splits: dict[str, dict[str, list[str]]] = {
+            d: {p: [] for p in SPLITS} for d in smiles_by_dataset
+        }
+        for d, s, p in zip(datasets, smiles, part):
+            splits[d][p].append(s)
+        summary = {
+            "threshold": self.threshold,
+            "seed": self.seed,
+            "structures_shared_by_classes_removed": len(shared),
+            "n_scaffolds": len(unique),
+            "n_clusters": len(set(label_of.values())),
+            "split_sizes": {
+                d: {p: len(v) for p, v in parts.items()} for d, parts in splits.items()
+            },
+        }
+        return splits, summary
+
+    @staticmethod
+    def _standardize_smiles(smiles: str) -> str:
         try:
             return molvs.standardize_smiles(smiles)
         except Exception:
@@ -161,16 +313,13 @@ class SMILESDataModule(L.LightningDataModule):
 
         return coconut_path
 
-    def prepare_data(self):
-        smiles_file = self.data_dir / f"{self.dataset_type}_all.smi"
-
+    def _prepare_dataset(self, dataset_type: str) -> None:
+        """Write ``{dataset_type}_all.smi`` (standardized SMILES)."""
+        smiles_file = self.data_dir / f"{dataset_type}_all.smi"
         if smiles_file.exists():
-            print(f"Loading cached SMILES for {self.dataset_type} dataset")
-            with open(smiles_file, "r") as f:
-                smiles_list = [line.strip() for line in f]
             return
 
-        if self.dataset_type == "natural":
+        if dataset_type == "natural":
             filepath = self._download_coconut()
 
             # Extract SMILES from CSV
@@ -184,7 +333,7 @@ class SMILESDataModule(L.LightningDataModule):
                         if smiles and len(smiles) < 500:
                             smiles_list.append(smiles)
 
-        elif self.dataset_type == "synthetic":
+        elif dataset_type == "synthetic":
             filepath = self.data_dir / "zinc22.txt"
 
             # Read SMILES from file
@@ -201,7 +350,7 @@ class SMILESDataModule(L.LightningDataModule):
                         if smiles and len(smiles) < 500:
                             smiles_list.append(smiles)
 
-        elif self.dataset_type == "general":
+        elif dataset_type == "general":
             filepath = self.data_dir / "chembl35.txt"
 
             if not filepath.exists():
@@ -226,226 +375,66 @@ class SMILESDataModule(L.LightningDataModule):
 
         else:
             raise ValueError(
-                f"Unknown dataset type: {self.dataset_type}. Must be 'natural', 'synthetic', or 'general'"
+                f"Unknown dataset type: {dataset_type}. Must be 'natural', 'synthetic', or 'general'"
             )
 
         if self.max_samples:
             smiles_list = smiles_list[: self.max_samples]
 
-        # Save processed SMILES
-        smiles_file = self.data_dir / f"{self.dataset_type}_all.smi"
         with open(smiles_file, "w") as f:
             for smiles in tqdm(smiles_list, desc="Standardizing and saving SMILES"):
                 smiles = self._standardize_smiles(smiles)
                 f.write(smiles + "\n")
 
-        print(f"Prepared {len(smiles_list)} SMILES for {self.dataset_type} dataset")
+        print(f"Prepared {len(smiles_list)} SMILES for {dataset_type} dataset")
 
-    def _get_scaffold(self, smiles: str) -> str | None:
-        """Extract Bemis-Murcko scaffold from SMILES."""
-        try:
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is None:
-                return None
-            scaffold = MurckoScaffold.GetScaffoldForMol(mol)
-            # Remove chirality to group stereoisomers together
-            return Chem.MolToSmiles(scaffold, isomericSmiles=False)
-        except Exception:
-            return None
 
-    def _get_ecfp4_fingerprint(self, smiles: str):
-        """Calculate ECFP4 fingerprint from SMILES using MorganGenerator."""
-        try:
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is None:
-                return None
-            # ECFP4: radius=2, 2048 bits
-            fp = self.mfpgen.GetFingerprint(mol)
-            return fp
-        except Exception:
-            return None
+class SMILESDataModule(L.LightningDataModule):
+    """Training data for one dataset, taken from a :class:`SplitManager`."""
 
-    def scaffold_split(
-        self, smiles_list: list[str], val_split: float, test_split: float
+    def __init__(
+        self,
+        split_manager: SplitManager,
+        dataset_type: str = "natural",  # "natural", "synthetic" or "general"
+        tokenizer_name: str = "kohbanye/SmilesTokenizer_PubChem_1M",
+        batch_size: int = 32,
+        max_length: int = 512,
+        num_workers: int = 4,
+        randomize: bool = False,
+        canonical: bool = False,
+        scaffold_only: bool = False,
     ):
-        """Split dataset based on molecular scaffolds.
+        super().__init__()
+        self.split_manager = split_manager
+        self.dataset_type = dataset_type
+        self.tokenizer_name = tokenizer_name
+        self.batch_size = batch_size
+        self.max_length = max_length
+        self.num_workers = num_workers
+        self.randomize = randomize
+        self.canonical = canonical
+        self.scaffold_only = scaffold_only
 
-        This method groups molecules by scaffold, then clusters similar scaffolds
-        using ECFP4 fingerprints to prevent similar molecules from appearing in different splits.
-        """
-        # Extract scaffolds and create group labels
-        scaffolds = []
-        for smiles in tqdm(smiles_list, desc="Extracting scaffolds"):
-            scaffold = self._get_scaffold(smiles)
-            if scaffold is None:
-                scaffold = smiles  # Use SMILES itself if scaffold extraction fails
-            scaffolds.append(scaffold)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Map scaffolds to integer group IDs and find representative molecules
-        unique_scaffolds = list(set(scaffolds))
-        scaffold_to_id = {
-            scaffold: idx for idx, scaffold in enumerate(unique_scaffolds)
-        }
-        scaffold_to_indices = {scaffold: [] for scaffold in unique_scaffolds}
-        for idx, scaffold in enumerate(scaffolds):
-            scaffold_to_indices[scaffold].append(idx)
-
-        print(f"Found {len(unique_scaffolds)} unique scaffolds")
-
-        # Calculate ECFP4 fingerprints for scaffolds
-        print("Calculating ECFP4 fingerprints for scaffolds...")
-        scaffold_fps = []
-        for scaffold in tqdm(unique_scaffolds, desc="Computing fingerprints"):
-            fp = self._get_ecfp4_fingerprint(scaffold)
-            if fp is None:
-                # Create empty fingerprint for invalid scaffolds
-                fp = DataStructs.ExplicitBitVect(2048)
-            scaffold_fps.append(fp)
-
-        # Cluster scaffolds using Union-Find
-        uf = UnionFind(len(unique_scaffolds))
-        n_scaffolds = len(scaffold_fps)
-
-        for i in tqdm(range(n_scaffolds), desc="Finding similar scaffolds"):
-            sims = DataStructs.BulkTanimotoSimilarity(
-                scaffold_fps[i], scaffold_fps[i + 1 :]
-            )
-            for j, sim in enumerate(sims):
-                if sim >= self.similarity_threshold:
-                    uf.union(i, i + j + 1)
-
-        # Get cluster labels
-        scaffold_cluster_labels = uf.get_clusters()
-
-        print(
-            f"Scaffold clusters: {len(set(scaffold_cluster_labels))} clusters from {len(unique_scaffolds)} scaffolds"
+        self.collate_fn = DataCollatorForLanguageModeling(
+            tokenizer=self.tokenizer,
+            mlm=False,
         )
 
-        # Assign cluster labels to all molecules based on their scaffold
-        molecule_cluster_labels = np.array(
-            [
-                scaffold_cluster_labels[scaffold_to_id[scaffold]]
-                for scaffold in scaffolds
-            ]
-        )
-
-        # First split: train vs (val + test)
-        test_val_split = val_split + test_split
-        gss_train = GroupShuffleSplit(
-            n_splits=1, test_size=test_val_split, random_state=42
-        )
-        train_indices, test_val_indices = next(
-            gss_train.split(np.arange(len(smiles_list)), groups=molecule_cluster_labels)
-        )
-
-        # Second split: val vs test from the test_val set
-        test_val_groups = molecule_cluster_labels[test_val_indices]
-        val_ratio = val_split / test_val_split
-        gss_test = GroupShuffleSplit(
-            n_splits=1, test_size=1 - val_ratio, random_state=42
-        )
-        val_indices_local, test_indices_local = next(
-            gss_test.split(test_val_indices, groups=test_val_groups)
-        )
-
-        # Convert local indices back to global indices
-        val_indices = test_val_indices[val_indices_local]
-        test_indices = test_val_indices[test_indices_local]
-
-        print(
-            f"Split sizes: train={len(train_indices)}, val={len(val_indices)}, test={len(test_indices)}"
-        )
-
-        return train_indices.tolist(), val_indices.tolist(), test_indices.tolist()
+    def prepare_data(self):
+        self.split_manager.prepare()
 
     def setup(self, stage: str | None = None):
-        # Check for cached splits
-        train_file = self.data_dir / f"{self.dataset_type}_train.smi"
-        val_file = self.data_dir / f"{self.dataset_type}_val.smi"
-        test_file = self.data_dir / f"{self.dataset_type}_test.smi"
-
-        if train_file.exists() and val_file.exists() and test_file.exists():
-            print(f"Loading cached splits for {self.dataset_type} dataset")
-            with open(train_file, "r") as f:
-                train_smiles = [line.strip() for line in f]
-            with open(val_file, "r") as f:
-                val_smiles = [line.strip() for line in f]
-            with open(test_file, "r") as f:
-                test_smiles = [line.strip() for line in f]
-
-            # Create datasets from cached splits
-            self.train_dataset = SMILESDataset(
-                train_smiles,
-                self.tokenizer,
-                self.max_length,
-                randomize=self.randomize,
-                canonical=self.canonical,
-                scaffold_only=self.scaffold_only,
-            )
-            self.val_dataset = SMILESDataset(
-                val_smiles,
-                self.tokenizer,
-                self.max_length,
-                randomize=False,  # Don't randomize validation
-                canonical=self.canonical,
-                scaffold_only=self.scaffold_only,
-            )
-            self.test_dataset = SMILESDataset(
-                test_smiles,
-                self.tokenizer,
-                self.max_length,
-                randomize=False,  # Don't randomize test
-                canonical=self.canonical,
-                scaffold_only=self.scaffold_only,
-            )
-
-            print(
-                f"Loaded splits: train={len(train_smiles)}, val={len(val_smiles)}, test={len(test_smiles)}"
-            )
-            return
-
-        # Load or prepare full dataset
-        smiles_file = self.data_dir / f"{self.dataset_type}_all.smi"
-
-        if not smiles_file.exists():
-            self.prepare_data()
-
-        with open(smiles_file, "r") as f:
-            smiles_list = [line.strip() for line in f]
-
-        if self.max_samples:
-            smiles_list = smiles_list[: self.max_samples]
-
-        # Perform scaffold split
-        train_indices, val_indices, test_indices = self.scaffold_split(
-            smiles_list, self.val_split, self.test_split
-        )
-
-        # Save split SMILES to files
-        train_smiles = [smiles_list[i] for i in train_indices]
-        val_smiles = [smiles_list[i] for i in val_indices]
-        test_smiles = [smiles_list[i] for i in test_indices]
-
-        with open(train_file, "w") as f:
-            for smiles in train_smiles:
-                f.write(smiles + "\n")
-        with open(val_file, "w") as f:
-            for smiles in val_smiles:
-                f.write(smiles + "\n")
-        with open(test_file, "w") as f:
-            for smiles in test_smiles:
-                f.write(smiles + "\n")
-
+        smiles = self.split_manager.load(self.dataset_type)
         print(
-            f"Saved splits: train={len(train_smiles)}, val={len(val_smiles)}, test={len(test_smiles)}"
+            f"Loaded splits for {self.dataset_type}: "
+            + ", ".join(f"{p}={len(v)}" for p, v in smiles.items())
         )
-
-        train_smiles_selected = [smiles_list[i] for i in train_indices]
-        val_smiles_selected = [smiles_list[i] for i in val_indices]
-        test_smiles_selected = [smiles_list[i] for i in test_indices]
-
         self.train_dataset = SMILESDataset(
-            train_smiles_selected,
+            smiles["train"],
             self.tokenizer,
             self.max_length,
             randomize=self.randomize,
@@ -453,18 +442,18 @@ class SMILESDataModule(L.LightningDataModule):
             scaffold_only=self.scaffold_only,
         )
         self.val_dataset = SMILESDataset(
-            val_smiles_selected,
+            smiles["val"],
             self.tokenizer,
             self.max_length,
-            randomize=False,
+            randomize=False,  # Don't randomize validation
             canonical=self.canonical,
             scaffold_only=self.scaffold_only,
         )
         self.test_dataset = SMILESDataset(
-            test_smiles_selected,
+            smiles["test"],
             self.tokenizer,
             self.max_length,
-            randomize=False,
+            randomize=False,  # Don't randomize test
             canonical=self.canonical,
             scaffold_only=self.scaffold_only,
         )

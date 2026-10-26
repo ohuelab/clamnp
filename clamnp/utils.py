@@ -17,9 +17,13 @@ class UnionFind:
         self.rank: list[int] = [0] * n
 
     def find(self, x: int) -> int:
-        if self.parent[x] != x:
-            self.parent[x] = self.find(self.parent[x])
-        return self.parent[x]
+        # Iterative with path halving: recursion runs out of stack on the long
+        # chains that clustering hundreds of thousands of scaffolds produces.
+        parent = self.parent
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
 
     def union(self, x: int, y: int) -> None:
         px, py = self.find(x), self.find(y)
@@ -41,6 +45,18 @@ class UnionFind:
                 roots[root] = len(roots)
             labels.append(roots[root])
         return labels
+
+
+def randomize_smiles(smiles: str, n: int, seed: int) -> list[str]:
+    """``n`` randomized SMILES of one molecule, deterministic given ``seed``.
+
+    The same writings as ``MolToSmiles(doRandom=True)``, which training uses, but
+    from a seeded generator; ``doRandom`` draws from RDKit's global RNG.
+    """
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"Invalid SMILES: {smiles}")
+    return list(Chem.MolToRandomSmilesVect(mol, n, randomSeed=seed))
 
 
 def calculate_diversity_metrics(
