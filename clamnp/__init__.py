@@ -10,7 +10,7 @@ Quick start (inference)::
 Importing this package is lightweight: the inference path (``CLaMNPScorer``,
 ``HFLanguageModel``) does not import PyTorch Lightning. Training utilities
 (``create_model``, ``BaseLanguageModel``, ``load_checkpoint``,
-``SMILESDataModule``) are imported lazily on first access and require the
+``SMILESDataModule``, ``SplitManager``) are imported lazily on first access and require the
 ``[train]`` optional dependencies.
 """
 
@@ -43,10 +43,11 @@ __all__ = [
     "GPT2Model",
     "load_checkpoint",
     "SMILESDataModule",
+    "SplitManager",
 ]
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from .data import SMILESDataModule
+    from .data import SMILESDataModule, SplitManager
     from .loading import load_checkpoint
     from .model import BaseLanguageModel, GPT2Model, create_model
 
@@ -59,6 +60,7 @@ _LAZY = {
     "GPT2Model": ("clamnp.model", "GPT2Model"),
     "load_checkpoint": ("clamnp.loading", "load_checkpoint"),
     "SMILESDataModule": ("clamnp.data", "SMILESDataModule"),
+    "SplitManager": ("clamnp.data", "SplitManager"),
 }
 
 

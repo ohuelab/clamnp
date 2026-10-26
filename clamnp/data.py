@@ -156,138 +156,141 @@ def cluster_scaffolds(
     return uf.get_clusters()
 
 
-def joint_scaffold_split(
-    smiles_by_dataset: dict[str, list[str]],
-    threshold: float = 0.6,
-    val_split: float = 0.1,
-    test_split: float = 0.1,
-    seed: int = 42,
-    workers: int = 16,
-) -> tuple[dict[str, dict[str, list[str]]], dict]:
-    """Split all datasets at once, so no scaffold cluster spans two splits.
+class SplitManager:
+    """The three datasets and the joint scaffold split they are trained on.
 
-    The scaffolds of every dataset are pooled and clustered together, and each
-    cluster goes to a single split, so a scaffold cannot sit in the training data
-    of one dataset and the evaluation data of another. Unparsable SMILES and exact
-    duplicates within a dataset are dropped, as are structures that the natural and
-    synthetic datasets share. Returns the split SMILES per dataset and a summary.
-    """
-    datasets, smiles, flats, scaffolds = [], [], [], []
-    with mp.Pool(workers) as pool:
-        for name, items in smiles_by_dataset.items():
-            seen: set[str] = set()
-            keys = pool.map(_keys, items, chunksize=500)
-            for s, k in zip(items, keys):
-                if k is None or s in seen:
-                    continue
-                seen.add(s)
-                datasets.append(name)
-                smiles.append(s)
-                flats.append(k[0])
-                scaffolds.append(k[1])
+    The split pools the scaffolds of COCONUT, ZINC 22 and ChEMBL, clusters them
+    together and assigns each cluster to a single split, so no scaffold sits in
+    the training data of one dataset and the evaluation data of another. Unparsable
+    SMILES and exact duplicates within a dataset are dropped, as are structures the
+    natural and synthetic datasets share.
 
-    in_classes: dict[str, set[str]] = {}
-    for d, f in zip(datasets, flats):
-        if d in CLASS_DATASETS:
-            in_classes.setdefault(f, set()).add(d)
-    shared = {f for f, ds in in_classes.items() if len(ds) > 1}
-    keep = [
-        i
-        for i, (d, f) in enumerate(zip(datasets, flats))
-        if not (d in CLASS_DATASETS and f in shared)
-    ]
-    datasets = [datasets[i] for i in keep]
-    smiles = [smiles[i] for i in keep]
-    scaffolds = [scaffolds[i] for i in keep]
-
-    unique = list(dict.fromkeys(scaffolds))
-    label_of = dict(zip(unique, cluster_scaffolds(unique, threshold, workers)))
-    groups = np.array([label_of[s] for s in scaffolds])
-
-    holdout = val_split + test_split
-    gss = GroupShuffleSplit(n_splits=1, test_size=holdout, random_state=seed)
-    _, rest = next(gss.split(np.arange(len(smiles)), groups=groups))
-    gss = GroupShuffleSplit(
-        n_splits=1, test_size=1 - val_split / holdout, random_state=seed
-    )
-    val_local, test_local = next(gss.split(rest, groups=groups[rest]))
-    part = np.full(len(smiles), "train", dtype=object)
-    part[rest[val_local]] = "val"
-    part[rest[test_local]] = "test"
-
-    splits: dict[str, dict[str, list[str]]] = {
-        d: {p: [] for p in SPLITS} for d in smiles_by_dataset
-    }
-    for d, s, p in zip(datasets, smiles, part):
-        splits[d][p].append(s)
-    summary = {
-        "threshold": threshold,
-        "seed": seed,
-        "structures_shared_by_classes_removed": len(shared),
-        "n_scaffolds": len(unique),
-        "n_clusters": len(set(label_of.values())),
-        "split_sizes": {
-            d: {p: len(v) for p, v in parts.items()} for d, parts in splits.items()
-        },
-    }
-    return splits, summary
-
-
-class SMILESDataModule(L.LightningDataModule):
-    """SMILES data for one dataset, split jointly with the other two.
-
-    The split needs all three datasets, so ``prepare_data`` prepares each of them
-    and writes ``{dataset}_{train,val,test}.smi`` for all three at once; see
-    :func:`joint_scaffold_split`.
+    :meth:`prepare` writes ``{dataset}_all.smi`` for each dataset and, once,
+    ``{dataset}_{train,val,test}.smi`` for all three; it is idempotent. Run it
+    once (``scripts/prepare_data.py``) before starting parallel training jobs, so
+    they do not build the split at the same time.
     """
 
     def __init__(
         self,
-        data_dir: str = "./data",
-        tokenizer_name: str = "kohbanye/SmilesTokenizer_PubChem_1M",
-        batch_size: int = 32,
-        max_length: int = 512,
-        num_workers: int = 4,
+        data_dir: str | Path = "./data",
+        max_samples: int | None = None,
+        threshold: float = 0.6,
         val_split: float = 0.1,
         test_split: float = 0.1,
-        dataset_type: str = "natural",  # "natural", "synthetic" or "general"
-        max_samples: int | None = None,
-        randomize: bool = False,
-        canonical: bool = False,
-        similarity_threshold: float = 0.6,
-        scaffold_only: bool = False,
         seed: int = 42,
-        split_workers: int = 16,
+        workers: int = 16,
     ):
-        super().__init__()
         self.data_dir = Path(data_dir)
-        self.tokenizer_name = tokenizer_name
-        self.batch_size = batch_size
-        self.max_length = max_length
-        self.num_workers = num_workers
+        self.max_samples = max_samples
+        self.threshold = threshold
         self.val_split = val_split
         self.test_split = test_split
-        self.dataset_type = dataset_type
-        self.max_samples = max_samples
-        self.randomize = randomize
-        self.canonical = canonical
-        self.similarity_threshold = similarity_threshold
-        self.scaffold_only = scaffold_only
         self.seed = seed
-        self.split_workers = split_workers
+        self.workers = workers
 
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+    def prepare(self) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        for dataset_type in DATASET_TYPES:
+            self._prepare_dataset(dataset_type)
+        if all(self._split_file(d, p).exists() for d in DATASET_TYPES for p in SPLITS):
+            return
 
-        self.collate_fn = DataCollatorForLanguageModeling(
-            tokenizer=self.tokenizer,
-            mlm=False,
+        smiles_by_dataset = {}
+        for dataset_type in DATASET_TYPES:
+            with open(self.data_dir / f"{dataset_type}_all.smi") as f:
+                smiles_by_dataset[dataset_type] = [line.strip() for line in f]
+        splits, summary = self._split(smiles_by_dataset)
+        for dataset_type, parts in splits.items():
+            for part, smiles_list in parts.items():
+                with open(self._split_file(dataset_type, part), "w") as f:
+                    f.writelines(s + "\n" for s in smiles_list)
+        (self.data_dir / "joint_split.json").write_text(
+            json.dumps(summary, indent=2) + "\n"
         )
+        print(f"Saved joint splits: {summary['split_sizes']}")
 
-        self.data_dir.mkdir(exist_ok=True)
+    def load(self, dataset_type: str) -> dict[str, list[str]]:
+        """The train, val and test SMILES of one dataset."""
+        if not all(self._split_file(dataset_type, p).exists() for p in SPLITS):
+            self.prepare()
+        smiles = {}
+        for part in SPLITS:
+            with open(self._split_file(dataset_type, part)) as f:
+                smiles[part] = [line.strip() for line in f]
+        return smiles
 
-    def _standardize_smiles(self, smiles: str) -> str:
+    def _split_file(self, dataset_type: str, part: str) -> Path:
+        return self.data_dir / f"{dataset_type}_{part}.smi"
+
+    def _split(
+        self, smiles_by_dataset: dict[str, list[str]]
+    ) -> tuple[dict[str, dict[str, list[str]]], dict]:
+        """Split SMILES per dataset jointly; returns the splits and a summary."""
+        datasets, smiles, flats, scaffolds = [], [], [], []
+        with mp.Pool(self.workers) as pool:
+            for name, items in smiles_by_dataset.items():
+                seen: set[str] = set()
+                keys = pool.map(_keys, items, chunksize=500)
+                for s, k in zip(items, keys):
+                    if k is None or s in seen:
+                        continue
+                    seen.add(s)
+                    datasets.append(name)
+                    smiles.append(s)
+                    flats.append(k[0])
+                    scaffolds.append(k[1])
+
+        in_classes: dict[str, set[str]] = {}
+        for d, f in zip(datasets, flats):
+            if d in CLASS_DATASETS:
+                in_classes.setdefault(f, set()).add(d)
+        shared = {f for f, ds in in_classes.items() if len(ds) > 1}
+        keep = [
+            i
+            for i, (d, f) in enumerate(zip(datasets, flats))
+            if not (d in CLASS_DATASETS and f in shared)
+        ]
+        datasets = [datasets[i] for i in keep]
+        smiles = [smiles[i] for i in keep]
+        scaffolds = [scaffolds[i] for i in keep]
+
+        unique = list(dict.fromkeys(scaffolds))
+        label_of = dict(
+            zip(unique, cluster_scaffolds(unique, self.threshold, self.workers))
+        )
+        groups = np.array([label_of[s] for s in scaffolds])
+
+        holdout = self.val_split + self.test_split
+        gss = GroupShuffleSplit(n_splits=1, test_size=holdout, random_state=self.seed)
+        _, rest = next(gss.split(np.arange(len(smiles)), groups=groups))
+        gss = GroupShuffleSplit(
+            n_splits=1, test_size=1 - self.val_split / holdout, random_state=self.seed
+        )
+        val_local, test_local = next(gss.split(rest, groups=groups[rest]))
+        part = np.full(len(smiles), "train", dtype=object)
+        part[rest[val_local]] = "val"
+        part[rest[test_local]] = "test"
+
+        splits: dict[str, dict[str, list[str]]] = {
+            d: {p: [] for p in SPLITS} for d in smiles_by_dataset
+        }
+        for d, s, p in zip(datasets, smiles, part):
+            splits[d][p].append(s)
+        summary = {
+            "threshold": self.threshold,
+            "seed": self.seed,
+            "structures_shared_by_classes_removed": len(shared),
+            "n_scaffolds": len(unique),
+            "n_clusters": len(set(label_of.values())),
+            "split_sizes": {
+                d: {p: len(v) for p, v in parts.items()} for d, parts in splits.items()
+            },
+        }
+        return splits, summary
+
+    @staticmethod
+    def _standardize_smiles(smiles: str) -> str:
         try:
             return molvs.standardize_smiles(smiles)
         except Exception:
@@ -393,48 +396,51 @@ class SMILESDataModule(L.LightningDataModule):
 
         print(f"Prepared {len(smiles_list)} SMILES for {dataset_type} dataset")
 
-    def _split_file(self, dataset_type: str, part: str) -> Path:
-        return self.data_dir / f"{dataset_type}_{part}.smi"
+
+class SMILESDataModule(L.LightningDataModule):
+    """Training data for one dataset, taken from a :class:`SplitManager`."""
+
+    def __init__(
+        self,
+        split_manager: SplitManager,
+        dataset_type: str = "natural",  # "natural", "synthetic" or "general"
+        tokenizer_name: str = "kohbanye/SmilesTokenizer_PubChem_1M",
+        batch_size: int = 32,
+        max_length: int = 512,
+        num_workers: int = 4,
+        randomize: bool = False,
+        canonical: bool = False,
+        scaffold_only: bool = False,
+    ):
+        super().__init__()
+        self.split_manager = split_manager
+        self.dataset_type = dataset_type
+        self.tokenizer_name = tokenizer_name
+        self.batch_size = batch_size
+        self.max_length = max_length
+        self.num_workers = num_workers
+        self.randomize = randomize
+        self.canonical = canonical
+        self.scaffold_only = scaffold_only
+
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        self.collate_fn = DataCollatorForLanguageModeling(
+            tokenizer=self.tokenizer,
+            mlm=False,
+        )
 
     def prepare_data(self):
-        for dataset_type in DATASET_TYPES:
-            self._prepare_dataset(dataset_type)
-        if all(self._split_file(d, p).exists() for d in DATASET_TYPES for p in SPLITS):
-            return
-
-        smiles_by_dataset = {}
-        for dataset_type in DATASET_TYPES:
-            with open(self.data_dir / f"{dataset_type}_all.smi") as f:
-                smiles_by_dataset[dataset_type] = [line.strip() for line in f]
-        splits, summary = joint_scaffold_split(
-            smiles_by_dataset,
-            threshold=self.similarity_threshold,
-            val_split=self.val_split,
-            test_split=self.test_split,
-            seed=self.seed,
-            workers=self.split_workers,
-        )
-        for dataset_type, parts in splits.items():
-            for part, smiles_list in parts.items():
-                with open(self._split_file(dataset_type, part), "w") as f:
-                    f.writelines(s + "\n" for s in smiles_list)
-        (self.data_dir / "joint_split.json").write_text(
-            json.dumps(summary, indent=2) + "\n"
-        )
-        print(f"Saved joint splits: {summary['split_sizes']}")
+        self.split_manager.prepare()
 
     def setup(self, stage: str | None = None):
-        if not all(self._split_file(self.dataset_type, p).exists() for p in SPLITS):
-            self.prepare_data()
-        smiles = {}
-        for part in SPLITS:
-            with open(self._split_file(self.dataset_type, part)) as f:
-                smiles[part] = [line.strip() for line in f]
+        smiles = self.split_manager.load(self.dataset_type)
         print(
             f"Loaded splits for {self.dataset_type}: "
             + ", ".join(f"{p}={len(v)}" for p, v in smiles.items())
         )
-
         self.train_dataset = SMILESDataset(
             smiles["train"],
             self.tokenizer,

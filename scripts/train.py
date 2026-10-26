@@ -14,7 +14,7 @@ from lightning.pytorch.callbacks import (
 from lightning.pytorch.loggers import WandbLogger
 
 import wandb
-from clamnp.data import SMILESDataModule
+from clamnp.data import SMILESDataModule, SplitManager
 from clamnp.model import create_model
 
 
@@ -88,7 +88,7 @@ def parse_args():
         "--split_workers",
         type=int,
         default=16,
-        help="Processes for building the joint scaffold split (first run only)",
+        help="Processes for building the joint split, if scripts/prepare_data.py has not",
     )
 
     # Tokenizer arguments
@@ -234,21 +234,24 @@ def main():
 
     # Initialize data module
     print("\nInitializing data module...")
-    data_module = SMILESDataModule(
+    split_manager = SplitManager(
         data_dir=args.data_dir,
+        max_samples=args.max_samples,
+        val_split=args.val_split,
+        test_split=args.test_split,
+        seed=args.seed,
+        workers=args.split_workers,
+    )
+    data_module = SMILESDataModule(
+        split_manager,
+        dataset_type=args.dataset_type,
         tokenizer_name=args.tokenizer_name,
         batch_size=args.batch_size,
         max_length=args.max_length,
         num_workers=args.num_workers,
-        val_split=args.val_split,
-        test_split=args.test_split,
-        dataset_type=args.dataset_type,
-        max_samples=args.max_samples,
         randomize=args.randomize,
         canonical=args.canonical,
         scaffold_only=args.scaffold_only,
-        seed=args.seed,
-        split_workers=args.split_workers,
     )
 
     # Initialize model
