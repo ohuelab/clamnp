@@ -157,18 +157,9 @@ def cluster_scaffolds(
 
 
 class SplitManager:
-    """The three datasets and the joint scaffold split they are trained on.
+    """Prepares the three datasets and splits them jointly by scaffold cluster.
 
-    The split pools the scaffolds of COCONUT, ZINC 22 and ChEMBL, clusters them
-    together and assigns each cluster to a single split, so no scaffold sits in
-    the training data of one dataset and the evaluation data of another. Unparsable
-    SMILES and exact duplicates within a dataset are dropped, as are structures the
-    natural and synthetic datasets share.
-
-    :meth:`prepare` writes ``{dataset}_all.smi`` for each dataset and, once,
-    ``{dataset}_{train,val,test}.smi`` for all three; it is idempotent. Run it
-    once (``scripts/prepare_data.py``) before starting parallel training jobs, so
-    they do not build the split at the same time.
+    Run :meth:`prepare` once before training (``scripts/prepare_data.py``).
     """
 
     def __init__(
@@ -190,6 +181,7 @@ class SplitManager:
         self.workers = workers
 
     def prepare(self) -> None:
+        """Write each dataset's SMILES and the joint split, unless they exist."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         for dataset_type in DATASET_TYPES:
             self._prepare_dataset(dataset_type)
@@ -211,7 +203,7 @@ class SplitManager:
         print(f"Saved joint splits: {summary['split_sizes']}")
 
     def load(self, dataset_type: str) -> dict[str, list[str]]:
-        """The train, val and test SMILES of one dataset."""
+        """Train, val and test SMILES of one dataset."""
         if not all(self._split_file(dataset_type, p).exists() for p in SPLITS):
             self.prepare()
         smiles = {}
@@ -226,7 +218,7 @@ class SplitManager:
     def _split(
         self, smiles_by_dataset: dict[str, list[str]]
     ) -> tuple[dict[str, dict[str, list[str]]], dict]:
-        """Split SMILES per dataset jointly; returns the splits and a summary."""
+        """Split all datasets jointly; returns the splits and a summary."""
         datasets, smiles, flats, scaffolds = [], [], [], []
         with mp.Pool(self.workers) as pool:
             for name, items in smiles_by_dataset.items():
@@ -322,7 +314,7 @@ class SplitManager:
         return coconut_path
 
     def _prepare_dataset(self, dataset_type: str) -> None:
-        """Write ``{dataset_type}_all.smi``, one standardized SMILES per line."""
+        """Write ``{dataset_type}_all.smi`` (standardized SMILES)."""
         smiles_file = self.data_dir / f"{dataset_type}_all.smi"
         if smiles_file.exists():
             return
