@@ -75,20 +75,8 @@ scorer = CLaMNPScorer.from_pretrained(scoring_mode="stabilized")
 scorer.score(["CCO", "c1ccccc1"])                # batch -> list of normalized [0, 1] scores
 scorer.score("CN1CCC[C@H]1c1cccnc1")             # single SMILES -> one score
 scorer.score(["CCO", "c1ccccc1"], raw=True)      # raw log-likelihood ratios
-scorer.score_with_details("CCO")                 # full breakdown (log P, perplexity, α, ...)
-```
-
-### Averaging over randomized SMILES
-
-A language model reads a SMILES string in one particular atom order, so the score
-of a single molecule moves a little with how it is written. Pass `n_enum` to
-average over that many randomized SMILES instead of scoring the canonical form
-once. This is worth doing when individual values are compared; for ranking a
-large set the canonical score is usually enough. The cost grows linearly with
-`n_enum`, and `seed` makes the enumeration reproducible.
-
-```python
 scorer.score(["CCO", "c1ccccc1"], n_enum=32)     # mean over 32 randomized SMILES
+scorer.score_with_details("CCO")                 # full breakdown (log P, perplexity, α, ...)
 ```
 
 ## Models
@@ -97,43 +85,6 @@ Models are hosted on the Hugging Face Hub at
 [`kohbanye/clamnp`](https://huggingface.co/kohbanye/clamnp), with one subfolder
 per model (`natural`, `synthetic`, `general`). The shared SMILES tokenizer is
 [`kohbanye/SmilesTokenizer_PubChem_1M`](https://huggingface.co/kohbanye/SmilesTokenizer_PubChem_1M).
-
-## Reproducing the models
-
-The released models are trained on a joint scaffold split: the scaffolds of all
-three datasets are clustered together, and each cluster goes to a single split,
-so no scaffold is shared between the training data of one dataset and the
-evaluation data of another. Training needs the `train` extra (or `uv sync`).
-
-1. Put one standardized SMILES per line in `data/{natural,synthetic,general}_all.smi`.
-
-   ```bash
-   # natural: COCONUT, August 2025 release (downloaded automatically)
-   uv run python -c "from clamnp.data import SMILESDataModule as D; D(dataset_type='natural').prepare_data()"
-
-   # synthetic: the ZINC 22 sample the released models were trained on
-   hf download kohbanye/clamnp data/zinc22_sample.smi --local-dir .
-   mv data/zinc22_sample.smi data/synthetic_all.smi
-
-   # general: the first 700,000 entries of ChEMBL 35, from data/chembl35.txt (SMILES<TAB>ChEMBL ID)
-   uv run python -c "from clamnp.data import SMILESDataModule as D; D(dataset_type='general', max_samples=700_000).prepare_data()"
-   ```
-
-2. Build the joint split. The pairwise similarity scan takes several hours.
-
-   ```bash
-   uv run python scripts/joint_split.py --data-dir data --out-dir data/joint --workers 16
-   ```
-
-3. Train each model on it.
-
-   ```bash
-   for t in natural synthetic general; do
-     uv run python scripts/train.py --dataset_type $t --data_dir data/joint --model_type gpt2 --randomize
-   done
-   ```
-
-`scripts/convert_to_hf.py` turns the resulting `.ckpt` files into the Hub layout.
 
 ## License
 
