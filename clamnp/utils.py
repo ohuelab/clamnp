@@ -47,6 +47,18 @@ class UnionFind:
         return labels
 
 
+def randomize_smiles(smiles: str, n: int, seed: int) -> list[str]:
+    """``n`` randomized SMILES of one molecule, deterministic given ``seed``.
+
+    The same writings as ``MolToSmiles(doRandom=True)``, which training uses, but
+    from a seeded generator; ``doRandom`` draws from RDKit's global RNG.
+    """
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"Invalid SMILES: {smiles}")
+    return list(Chem.MolToRandomSmilesVect(mol, n, randomSeed=seed))
+
+
 def calculate_diversity_metrics(
     smiles_list: list[str],
     selected_indices: list[int],

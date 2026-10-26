@@ -21,6 +21,7 @@ from .constants import (
     SCORING_MODES,
 )
 from .scoring import HFLanguageModel, LogLikelihoodMixin
+from .utils import randomize_smiles
 
 
 class CLaMNPScorer:
@@ -149,20 +150,6 @@ class CLaMNPScorer:
 
         return Chem.MolToSmiles(mol, doRandom=False, canonical=True)
 
-    def _enumerate_smiles(self, smiles: str, n: int, seed: int) -> list[str]:
-        """``n`` randomized SMILES for one molecule, deterministic given ``seed``."""
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            raise ValueError(f"Invalid SMILES: {smiles}")
-        if self.scaffold_only:
-            try:
-                mol = MurckoScaffold.GetScaffoldForMol(mol)
-            except Exception:
-                pass
-        # Same writings as training's MolToSmiles(doRandom=True), but from a seeded
-        # generator; doRandom draws from RDKit's global RNG and cannot be seeded.
-        return list(Chem.MolToRandomSmilesVect(mol, n, randomSeed=seed))
-
     def _calculate_dynamic_alpha(
         self, log_p_synthetic: float, log_p_general: float
     ) -> float:
@@ -285,41 +272,27 @@ class CLaMNPScorer:
             raise ValueError("n_enum must be >= 0")
 
         single = isinstance(smiles, str)
-        smiles_list = [smiles] if single else list(smiles)
-        raw_scores = self._raw_scores(smiles_list, n_enum, seed)
+        molecules = [
+            self._validate_and_canonicalize(s) for s in ([smiles] if single else smiles)
+        ]
+        # n_enum only changes what is fed to the models: each molecule's canonical
+        # SMILES, or n_enum randomized writings of it, averaged back below.
+        if n_enum:
+            inputs = [w for m in molecules for w in randomize_smiles(m, n_enum, seed)]
+        else:
+            inputs = molecules
+        values = self._batch_score_raw(inputs)
+        per_molecule = max(n_enum, 1)
+        # Averaged on the raw scale: the sigmoid would pull the mean towards 0.5.
+        raw_scores = [
+            sum(values[i : i + per_molecule]) / per_molecule
+            for i in range(0, len(values), per_molecule)
+        ]
         scores = raw_scores if raw else [self._sigmoid_normalize(s) for s in raw_scores]
         return scores[0] if single else scores
 
-    def _raw_scores(
-        self, smiles_list: list[str], n_enum: int, seed: int
-    ) -> list[float]:
-        """One raw score per molecule, averaged over ``n_enum`` writings if > 0."""
-        if not n_enum:
-            return self._batch_score_raw(smiles_list)
-        # One flat batch over every writing of every molecule, then regrouped. The
-        # mean is over raw scores, before the sigmoid, which would bias it to 0.5.
-        writings = [
-            w for s in smiles_list for w in self._enumerate_smiles(s, n_enum, seed)
-        ]
-        values = self._batch_score_processed(writings)
-        return [
-            sum(values[i : i + n_enum]) / n_enum for i in range(0, len(values), n_enum)
-        ]
-
     def _batch_score_raw(self, smiles_list: list[str]) -> list[float]:
-        """Raw NP-likeness scores for a batch of SMILES strings."""
-        return self._batch_score_processed(
-            [self._validate_and_canonicalize(smiles) for smiles in smiles_list]
-        )
-
-    def _batch_score_processed(self, smiles_list: list[str]) -> list[float]:
-        """Raw scores for strings that are already in the form to be fed to the models.
-
-        Separate from :meth:`_batch_score_raw` so that enumerated SMILES reach the
-        models as written: canonicalising them first would collapse every
-        enumeration of a molecule back onto one string.
-        """
-
+        """Raw scores for a batch of SMILES, fed to the models as written."""
         if self.scoring_mode == "unstabilized":
             log_p_natural_list = self.natural_model.batch_calculate_log_likelihood(
                 smiles_list
